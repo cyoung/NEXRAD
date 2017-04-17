@@ -1,17 +1,17 @@
-package main
+package NEXRAD
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
+	"github.com/buckhx/tiles"
 	"image"
 	"image/color"
 	"image/png"
-	"os"
+	"io/ioutil"
+	"net/http"
 	"sort"
-)
-
-const (
-	REDUCE_MATRIX_SZ = 8
 )
 
 // n0q raster values: https://mesonet.agron.iastate.edu/GIS/rasters.php?rid=2
@@ -582,31 +582,45 @@ func fillImage(newImg *image.NRGBA64, newColor color.Color, x, y, sz int) {
 	}
 }
 
-func main() {
-	inf, err := os.Open(os.Args[1])
+func GetImage(X, Y, Z int) (*bytes.Reader, error) {
+	url := fmt.Sprintf("https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/%d/%d/%d.png", Z, X, Y)
+	fmt.Printf("getting tile: '%s'.\n", url)
+	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Printf("can't open '%s'\n", os.Args[1])
-		return
+		return nil, err
 	}
-	defer inf.Close()
+	defer resp.Body.Close()
 
-	src, _, err := image.Decode(inf)
+	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Printf("image decode err: %s\n", err.Error())
-		return
+		return nil, err
+	}
+
+	return bytes.NewReader(body), nil
+
+}
+
+func GetCompressedImage(X, Y, Z, reduceMatrix int) ([]byte, error) { //FIXME: reduceMatrix is a power of two.
+	img, err := GetImage(X, Y, Z)
+	if err != nil {
+		return nil, err
+	}
+
+	src, _, err := image.Decode(img)
+	if err != nil {
+		return nil, err
 	}
 
 	bounds := src.Bounds()
 	// Check if the image is 256x256.
 	if ((bounds.Max.X - bounds.Min.X) != 256) || ((bounds.Max.Y - bounds.Min.Y) != 256) {
-		fmt.Printf("not a 256x256 tile.\n")
-		return
+		return nil, errors.New("not a 256x256 tile.")
 	}
 
 	// Create new image with reduced color depth.
 	newImg := image.NewNRGBA64(bounds)
 
-	grp := extractMatrix(bounds, src, REDUCE_MATRIX_SZ)
+	grp := extractMatrix(bounds, src, reduceMatrix)
 
 	for i := 0; i < len(grp); i++ {
 		for j := 0; j < len(grp[i]); j++ {
@@ -624,19 +638,22 @@ func main() {
 				newColor.A = 0 // No data.
 			}
 
-			fillImage(newImg, newColor, i, j, REDUCE_MATRIX_SZ)
+			fillImage(newImg, newColor, i, j, reduceMatrix)
 
 		}
 	}
 
 	// Write new image.
-	outf, err := os.Create(os.Args[2])
-	if err != nil {
-		fmt.Printf("can't write new file: %s\n", err.Error())
-		return
-	}
-	defer outf.Close()
+	var b bytes.Buffer
+	bytesWriter := bufio.NewWriter(&b)
+	png.Encode(bytesWriter, newImg)
+	bytesWriter.Flush()
 
-	png.Encode(outf, newImg)
+	return b.Bytes(), nil
 
+}
+
+func GetCompressedTileFromLatLng(lat, lng float64) ([]byte, error) {
+	myTile := tiles.FromCoordinate(lat, lng, 5)
+	return GetCompressedImage(myTile.X, myTile.Y, myTile.Z, 4)
 }
